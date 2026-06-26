@@ -314,7 +314,7 @@ final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInt
 
     override func doCommand(by selector: Selector) {
         switch selector {
-        case #selector(insertNewline(_:)): replaceSelection(with: "\n")
+        case #selector(insertNewline(_:)): replaceSelection(with: document.newline)
         case #selector(insertTab(_:)): replaceSelection(with: "\t")
         case #selector(deleteBackward(_:)):
             if hasSelection { replaceSelection(with: "") }
@@ -350,7 +350,7 @@ final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInt
         case #selector(scrollPageDown(_:)), #selector(pageDown(_:)): verticalMove(by: visibleLineCount, extend: false)
         case #selector(pageUpAndModifySelection(_:)): verticalMove(by: -visibleLineCount, extend: true)
         case #selector(pageDownAndModifySelection(_:)): verticalMove(by: visibleLineCount, extend: true)
-        case #selector(insertNewlineIgnoringFieldEditor(_:)): replaceSelection(with: "\n")
+        case #selector(insertNewlineIgnoringFieldEditor(_:)): replaceSelection(with: document.newline)
         default: break
         }
     }

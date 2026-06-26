@@ -56,6 +56,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
 
         window.delegate = self
         window.makeFirstResponder(textView)
+        reflectDocument()
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -129,6 +130,14 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         window?.title = "\(mark)\(displayName) - Notepad"
     }
 
+    /// Reflect the current document's format in the status bar + title.
+    private func reflectDocument() {
+        statusBar.setEncoding(doc.format.encodingLabel)
+        statusBar.setLineEnding(doc.format.lineEndingLabel)
+        statusBar.setPosition(line: 1, col: 1)
+        updateTitle()
+    }
+
     required init?(coder: NSCoder) { fatalError() }
 
     private func layoutContent(in bounds: NSRect) {
@@ -161,9 +170,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
                 let doc = TextDocument(file: mapped, index: idx, url: url)
                 self.doc = doc
                 self.textView.setDocument(doc)
-                self.statusBar.setEncoding("UTF-8")
-                self.updateTitle()
-                self.statusBar.setPosition(line: 1, col: 1)
+                self.reflectDocument()
             }
         }
     }

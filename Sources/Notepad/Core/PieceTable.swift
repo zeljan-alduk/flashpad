@@ -31,12 +31,15 @@ final class PieceTable {
     private var bytePrefix: [Int] = [0]
     private var linePrefix: [Int] = [0]
 
-    init(original: MappedFile, index: LineIndex) {
+    init(original: MappedFile, index: LineIndex, contentStart: Int = 0) {
         self.original = original
         self.index = index
-        if original.count > 0 {
-            pieces = [Piece(source: .original, start: 0,
-                            length: original.count, lineFeeds: index.totalLineFeeds)]
+        let len = original.count - contentStart
+        if len > 0 {
+            // BOM (if any) carries no newline, so the whole-file feed count is
+            // also the content feed count.
+            pieces = [Piece(source: .original, start: contentStart,
+                            length: len, lineFeeds: index.totalLineFeeds)]
         }
         rebuild()
     }

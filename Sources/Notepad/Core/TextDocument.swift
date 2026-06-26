@@ -22,11 +22,18 @@ final class TextDocument {
     /// URL backing this document, or nil for an untitled buffer.
     var fileURL: URL?
 
+    /// Detected byte format (encoding, BOM, line ending).
+    let format: DetectedFormat
+    /// Line ending inserted when the user presses Return.
+    var newline: String { format.newline }
+
     init(file: MappedFile, index: LineIndex, url: URL?) {
         self.file = file
         self.index = index
         self.fileURL = url
-        self.pieceTable = PieceTable(original: file, index: index)
+        let fmt = detectFormat(file)
+        self.format = fmt
+        self.pieceTable = PieceTable(original: file, index: index, contentStart: fmt.contentStart)
 
         // As the background scan discovers newlines, keep the (still unedited)
         // original piece's line count live, mirroring M0's growing document.
@@ -83,6 +90,9 @@ final class TextDocument {
         let fd = open(tmp.path, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
         guard fd >= 0 else { throw SaveError.cannotCreate }
 
+        if !format.bomBytes.isEmpty {
+            _ = format.bomBytes.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+        }
         let ok = pieceTable.streamBytes(toFileDescriptor: fd)
         fsync(fd)
         close(fd)
