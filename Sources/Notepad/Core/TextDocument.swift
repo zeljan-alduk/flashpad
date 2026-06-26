@@ -17,7 +17,13 @@ final class TextDocument {
     let undoManager = UndoManager()
 
     weak var delegate: TextDocumentDelegate?
-    private(set) var isModified = false
+
+    // A change counter (à la NSDocument): +1 per edit/redo, -1 per undo. The
+    // document is "modified" only when it differs from its value at last save,
+    // so undoing back to the saved state clears the dirty marker.
+    private var changeCount = 0
+    private var savedChangeCount = 0
+    var isModified: Bool { changeCount != savedChangeCount }
 
     /// URL backing this document, or nil for an untitled buffer.
     var fileURL: URL?
@@ -116,11 +122,11 @@ final class TextDocument {
         undoManager.registerUndo(withTarget: self) { doc in
             doc.replace(newRange, with: removed)
         }
-        isModified = true
+        changeCount += undoManager.isUndoing ? -1 : 1
         delegate?.document(self, didEditPlacingCaretAt: newRange.upperBound)
     }
 
-    func markSaved() { isModified = false }
+    func markSaved() { savedChangeCount = changeCount }
 
     enum SaveError: Error { case cannotCreate, writeFailed, renameFailed }
 
