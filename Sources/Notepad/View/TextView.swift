@@ -58,9 +58,7 @@ final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInt
 
     init(document: TextDocument) {
         self.document = document
-        let f = NSFont(name: "Consolas", size: 15)
-            ?? NSFont(name: "Menlo", size: 14)
-            ?? NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
+        let f = AppFonts.editor(15)
         self.font = f
         self.baseFont = f
         self.ascent = f.ascender

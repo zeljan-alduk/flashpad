@@ -15,8 +15,7 @@ final class WinMenuBar: NSView {
         wantsLayer = true
         layer?.backgroundColor = NSColor.white.cgColor
 
-        let chromeFont = NSFont(name: "Segoe UI", size: 13)
-            ?? NSFont.systemFont(ofSize: 13)
+        let chromeFont = AppFonts.ui(13)
 
         var x: CGFloat = 0
         for title in titles {

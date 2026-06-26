@@ -27,7 +27,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if ProcessInfo.processInfo.environment["NOTEPAD_TIMING"] != nil {
             let ms = Date().timeIntervalSince(LaunchClock.start) * 1000
-            FileHandle.standardError.write(Data(String(format: "STARTUP %.1f ms\n", ms).utf8))
+            let mono = NSFont(name: "CascadiaMono-Regular", size: 12) != nil
+            let ui = NSFont(name: "Selawik-Regular", size: 12) != nil
+            FileHandle.standardError.write(Data(String(format: "STARTUP %.1f ms  fonts: cascadia=%@ selawik=%@\n",
+                ms, mono ? "yes" : "no", ui ? "yes" : "no").utf8))
         }
     }
 

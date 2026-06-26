@@ -5,6 +5,7 @@ if CommandLine.arguments.contains("--selftest") {
 }
 
 LaunchClock.start = Date()
+AppFonts.registerBundledFonts()
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate

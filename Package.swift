@@ -8,6 +8,7 @@ let package = Package(
         .executableTarget(
             name: "Notepad",
             path: "Sources/Notepad",
+            resources: [.copy("Fonts")],
             swiftSettings: [
                 .swiftLanguageMode(.v5),
                 .unsafeFlags(["-Ounchecked"], .when(configuration: .release)),

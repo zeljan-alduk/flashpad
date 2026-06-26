@@ -15,6 +15,12 @@ cp "$BIN" "$APP/Contents/MacOS/Notepad"
 if [ ! -f Resources/AppIcon.icns ]; then ./Scripts/make-icon.sh; fi
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
+# SwiftPM resource bundle (bundled fonts) so Bundle.module resolves in the .app.
+BIN_DIR="$(dirname "$BIN")"
+if [ -d "$BIN_DIR/Notepad_Notepad.bundle" ]; then
+  cp -R "$BIN_DIR/Notepad_Notepad.bundle" "$APP/Contents/Resources/"
+fi
+
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

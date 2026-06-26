@@ -13,7 +13,7 @@ final class StatusBar: NSView {
         wantsLayer = true
         layer?.backgroundColor = NSColor(white: 0.95, alpha: 1).cgColor
 
-        let chromeFont = NSFont(name: "Segoe UI", size: 12) ?? NSFont.systemFont(ofSize: 12)
+        let chromeFont = AppFonts.ui(12)
         for field in [position, zoom, lineEnding, encoding] {
             field.font = chromeFont
             field.textColor = NSColor(white: 0.2, alpha: 1)
