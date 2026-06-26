@@ -44,11 +44,30 @@ final class MappedFile {
         madvise(p, size, MADV_SEQUENTIAL)
     }
 
+    /// A zero-length store, used for brand-new (untitled) documents.
+    private init() {
+        self.url = URL(fileURLWithPath: "/dev/null")
+        self.fd = -1
+        self.count = 0
+        self.rawBase = UnsafeRawPointer(bitPattern: MemoryLayout<UInt8>.alignment)!
+        self.mapLen = 0
+    }
+
+    static func empty() -> MappedFile { MappedFile() }
+
     deinit {
         if mapLen > 0 {
             munmap(UnsafeMutableRawPointer(mutating: rawBase), mapLen)
         }
         close(fd)
+    }
+
+    /// Reads bytes via `pread` without touching the mmap. Indexing uses this so
+    /// scanning the whole file populates only the (reclaimable, system-wide)
+    /// page cache rather than this process's resident set.
+    func readChunk(into buffer: UnsafeMutableRawPointer, offset: Int, count: Int) -> Int {
+        guard fd >= 0 else { return 0 }
+        return pread(fd, buffer, count, off_t(offset))
     }
 
     @inline(__always)

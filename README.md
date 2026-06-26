@@ -14,8 +14,13 @@ It does **not** use `NSTextView` (which loads the whole file into memory). Inste
   tiny even for hundreds of millions of lines.
 - **Viewport renderer** — a custom flipped `NSView` draws only the ~50 lines
   visible in the scroll viewport each frame.
-- **Piece table** (planned, M1) — edits go to a separate buffer; editing a 10 GB
-  file costs memory proportional to the edits, not the file.
+- **Piece table** — edits go to a separate buffer; the document is a list of
+  slices into either the mmap'd original or an "add" buffer, so editing a 10 GB
+  file costs memory proportional to the edits, not the file. Fuzz-tested against
+  a reference model over thousands of random edits (`Notepad --selftest`).
+- **pread indexing** — the newline scan reads 4 MB chunks via `pread` instead of
+  walking the mmap, so the whole file never enters our resident set. A 1.5 GB
+  file sits at **~100 MB RSS** after open.
 
 ## UI
 
@@ -34,7 +39,11 @@ swift run Notepad /path/to/file # open a file directly
 
 - **M0 ✅** mmap + sparse index + viewport renderer (read-only). Opens multi-GB
   files instantly with fast scroll.
-- **M1** Piece-table editing: caret, selection, keyboard input, undo/redo.
-- **M2** Find/Replace, Go To, Save/Save As, encoding + line-ending detection,
-  word wrap, font picker, zoom, status-bar wiring.
+- **M1 ✅** Piece-table editing: caret, selection, keyboard input, undo/redo,
+  cut/copy/paste, select-all, live Ln/Col status, dirty-title marker.
+  Plus multi-window (one process, one document per window) and low-memory
+  pread indexing (~100 MB RSS for a 1.5 GB file).
+- **M2** Save/Save As, Find/Replace, Go To, encoding + line-ending detection,
+  word wrap, font picker, zoom. (Typing-run undo coalescing; precise caret on
+  >20k-char single lines.)
 - **M3** Recent files, drag-drop, print, app icon, packaging/signing.

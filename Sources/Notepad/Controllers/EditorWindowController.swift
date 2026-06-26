@@ -2,14 +2,15 @@ import AppKit
 
 /// Owns one Notepad window: the in-window menu bar, the scrollable text view,
 /// and the status bar, laid out top-to-bottom like Windows 10 Notepad.
-final class EditorWindowController: NSWindowController {
+final class EditorWindowController: NSWindowController, NSWindowDelegate {
+    weak var coordinator: AppDelegate?
+
     private let menuBar = WinMenuBar()
     private let statusBar = StatusBar()
     private let scrollView = NSScrollView()
     private let textView: TextView
 
-    private var file: MappedFile?
-    private var index: LineIndex?
+    private var doc: TextDocument
 
     private let menuBarHeight: CGFloat = 25
     private let statusBarHeight: CGFloat = 23
@@ -23,7 +24,8 @@ final class EditorWindowController: NSWindowController {
         window.center()
         window.setFrameAutosaveName("NotepadMain")
 
-        self.textView = TextView(frame: .zero)
+        self.doc = TextDocument.empty()
+        self.textView = TextView(document: doc)
         super.init(window: window)
 
         let content = FlippedContainer()
@@ -44,13 +46,27 @@ final class EditorWindowController: NSWindowController {
 
         content.addSubview(statusBar)
 
-        textView.onScroll = { [weak self] topLine in
-            // 1-based for display; column tracking arrives with the caret (M1).
-            self?.statusBar.setPosition(line: topLine + 1, col: 1)
+        textView.onCaret = { [weak self] line, col in
+            self?.statusBar.setPosition(line: line, col: col)
         }
+        textView.onModifiedChange = { [weak self] in self?.updateTitle() }
 
         content.onLayout = { [weak self] bounds in self?.layoutContent(in: bounds) }
         layoutContent(in: content.bounds)
+
+        window.delegate = self
+        window.makeFirstResponder(textView)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        coordinator?.controllerDidClose(self)
+    }
+
+    private var displayName: String { doc.fileURL?.lastPathComponent ?? "Untitled" }
+
+    private func updateTitle() {
+        let mark = doc.isModified ? "*" : ""
+        window?.title = "\(mark)\(displayName) - Notepad"
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -73,43 +89,60 @@ final class EditorWindowController: NSWindowController {
             NSSound.beep()
             return
         }
+        // Index on a background thread so the line model is correct before the
+        // view ever draws (a partial index would treat the file as one line).
+        // ~0.2 s for 1.5 GB, ~1.4 s for 10 GB — the UI stays responsive.
+        window?.title = "Opening… - Notepad"
         let idx = LineIndex(file: mapped)
-        self.file = mapped
-        self.index = idx
-        textView.load(file: mapped, index: idx)
-        idx.build()
-
-        window?.title = "\(url.lastPathComponent) - Notepad"
-        statusBar.setEncoding("UTF-8")
-        scrollView.documentView?.scroll(.zero)
-    }
-
-    @objc func openDocument(_ sender: Any?) {
-        let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        panel.beginSheetModal(for: window!) { [weak self] resp in
-            if resp == .OK, let url = panel.url { self?.open(url: url) }
+        DispatchQueue.global(qos: .userInitiated).async {
+            idx.buildSynchronously()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                let doc = TextDocument(file: mapped, index: idx, url: url)
+                self.doc = doc
+                self.textView.setDocument(doc)
+                self.statusBar.setEncoding("UTF-8")
+                self.updateTitle()
+                self.statusBar.setPosition(line: 1, col: 1)
+            }
         }
     }
+
+    /// Whether this window is a pristine untitled buffer (reused instead of
+    /// spawning a second empty window when opening the first file).
+    var isPristine: Bool { doc.fileURL == nil && !doc.isModified }
 
     // MARK: - Windows-style dropdown menus
 
     private func makeMenu(for title: String) -> NSMenu {
         let menu = NSMenu()
+        func add(_ title: String, _ action: Selector?, _ key: String = "", target: AnyObject? = nil) {
+            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: key)
+            if let target { item.target = target }
+        }
         switch title {
         case "File":
-            menu.addItem(withTitle: "New", action: nil, keyEquivalent: "")
-            menu.addItem(withTitle: "Open...", action: #selector(openDocument(_:)), keyEquivalent: "")
-                .target = self
-            menu.addItem(withTitle: "Save", action: nil, keyEquivalent: "")
-            menu.addItem(withTitle: "Save As...", action: nil, keyEquivalent: "")
+            add("New", #selector(AppDelegate.newDocument(_:)), "n", target: coordinator)
+            add("Open...", #selector(AppDelegate.openDocument(_:)), "o", target: coordinator)
+            add("New Window", #selector(AppDelegate.newDocument(_:)), target: coordinator)
+            add("Save", nil)         // M2
+            add("Save As...", nil)   // M2
             menu.addItem(.separator())
-            menu.addItem(withTitle: "Exit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
+            add("Exit", #selector(NSApplication.terminate(_:)), target: NSApp)
         case "Edit":
-            for t in ["Undo", "Cut", "Copy", "Paste", "Delete", "Find...", "Replace...", "Go To...", "Select All"] {
-                menu.addItem(withTitle: t, action: nil, keyEquivalent: "")
-            }
+            // nil targets route up the responder chain to the focused TextView.
+            add("Undo", #selector(TextView.undo(_:)), "z")
+            add("Redo", #selector(TextView.redo(_:)), "Z")
+            menu.addItem(.separator())
+            add("Cut", #selector(NSText.cut(_:)), "x")
+            add("Copy", #selector(NSText.copy(_:)), "c")
+            add("Paste", #selector(NSText.paste(_:)), "v")
+            menu.addItem(.separator())
+            add("Find...", nil)      // M2
+            add("Replace...", nil)   // M2
+            add("Go To...", nil)     // M2
+            menu.addItem(.separator())
+            add("Select All", #selector(NSText.selectAll(_:)), "a")
         case "Format":
             menu.addItem(withTitle: "Word Wrap", action: nil, keyEquivalent: "")
             menu.addItem(withTitle: "Font...", action: nil, keyEquivalent: "")

@@ -25,6 +25,8 @@ final class LineIndex {
 
     var lineCount: Int { lock.withLock { _lineCount } }
     var isFinished: Bool { lock.withLock { _finished } }
+    /// Total number of '\n' bytes in the original file.
+    var totalLineFeeds: Int { lock.withLock { _lineCount - 1 } }
 
     func build() {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -32,27 +34,44 @@ final class LineIndex {
         }
     }
 
+    /// Builds the index on the calling thread. Used by tests and when an edit
+    /// needs an authoritative index before the background scan would finish.
+    func buildSynchronously() { scan() }
+
     private func scan() {
         let n = file.count
         if n == 0 { finish(lineCount: 1); return }
 
-        let base = file.rawBase
-        var i = 0
         var newlines = 0
         var cps: [Int] = [0]
         var lastPublishedNewlines = 0
 
-        while i < n {
-            guard let found = memchr(base + i, 0x0A, n - i) else { break }
-            let off = base.distance(to: found)   // byte offset of this '\n'
-            newlines += 1
-            let lineStart = off + 1              // next line begins after the newline
-            if newlines % stride == 0 {
-                cps.append(lineStart)
-            }
-            i = off + 1
+        // Scan in chunks via pread so the whole file never enters our RSS; only
+        // the small reusable buffer below is resident.
+        let chunkSize = 4 << 20
+        var buffer = [UInt8](repeating: 0, count: chunkSize)
+        var fileOffset = 0
 
-            // Publish progress periodically so the view can grow as we scan.
+        while fileOffset < n {
+            let want = min(chunkSize, n - fileOffset)
+            let got = buffer.withUnsafeMutableBytes {
+                file.readChunk(into: $0.baseAddress!, offset: fileOffset, count: want)
+            }
+            if got <= 0 { break }
+
+            buffer.withUnsafeBytes { raw in
+                let bptr = raw.baseAddress!
+                var j = 0
+                while j < got {
+                    guard let found = memchr(bptr + j, 0x0A, got - j) else { break }
+                    let local = bptr.distance(to: found)
+                    newlines += 1
+                    if newlines % stride == 0 { cps.append(fileOffset + local + 1) }
+                    j = local + 1
+                }
+            }
+            fileOffset += got
+
             if newlines - lastPublishedNewlines >= 1_000_000 {
                 lastPublishedNewlines = newlines
                 publish(checkpoints: cps, lineCount: newlines + 1, finished: false)
@@ -92,6 +111,34 @@ final class LineIndex {
             ln += 1
         }
         return off
+    }
+
+    /// 0-based line number that `offset` falls on, i.e. the count of '\n' bytes
+    /// strictly before `offset`. Cost is bounded by one checkpoint stride.
+    func lineOf(offset: Int) -> Int {
+        let n = file.count
+        let target = min(max(0, offset), n)
+        let (baseLine, baseOffset) = lock.withLock { () -> (Int, Int) in
+            // Largest checkpoint whose offset is <= target.
+            var lo = 0, hi = checkpoints.count - 1, best = 0
+            while lo <= hi {
+                let mid = (lo + hi) / 2
+                if checkpoints[mid] <= target { best = mid; lo = mid + 1 }
+                else { hi = mid - 1 }
+            }
+            return (best * stride, checkpoints[best])
+        }
+        var ln = baseLine
+        var off = baseOffset
+        let base = file.rawBase
+        while off < target {
+            guard let found = memchr(base + off, 0x0A, target - off) else { break }
+            let p = base.distance(to: found)
+            if p >= target { break }
+            ln += 1
+            off = p + 1
+        }
+        return ln
     }
 
     /// Byte offset of the newline (or EOF) ending the line that starts at `start`.
