@@ -102,6 +102,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         newItem.target = self
         let openItem = fileMenu.addItem(withTitle: "Open…", action: #selector(openDocument(_:)), keyEquivalent: "o")
         openItem.target = self
+        fileMenu.addItem(.separator())
+        // nil target → routed to the key window's EditorWindowController.
+        fileMenu.addItem(withTitle: "Save", action: #selector(EditorWindowController.saveDocument(_:)), keyEquivalent: "s")
+        let saveAs = fileMenu.addItem(withTitle: "Save As…", action: #selector(EditorWindowController.saveDocumentAs(_:)), keyEquivalent: "s")
+        saveAs.keyEquivalentModifierMask = [.command, .shift]
         fileItem.submenu = fileMenu
 
         let editItem = NSMenuItem(); mainMenu.addItem(editItem)

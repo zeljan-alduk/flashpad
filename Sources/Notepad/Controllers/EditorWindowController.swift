@@ -62,6 +62,66 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         coordinator?.controllerDidClose(self)
     }
 
+    /// Prompt to save unsaved changes before closing (Notepad behaviour).
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard doc.isModified else { return true }
+        let alert = NSAlert()
+        alert.messageText = "Do you want to save the changes you made to \(displayName)?"
+        alert.informativeText = "Your changes will be lost if you don't save them."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Don't Save")
+        alert.addButton(withTitle: "Cancel")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:  return saveSynchronously()
+        case .alertSecondButtonReturn: return true    // discard
+        default:                       return false   // cancel
+        }
+    }
+
+    // MARK: - Saving
+
+    @objc func saveDocument(_ sender: Any?) {
+        if let url = doc.fileURL { performSave(to: url) }
+        else { saveDocumentAs(sender) }
+    }
+
+    @objc func saveDocumentAs(_ sender: Any?) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = doc.fileURL?.lastPathComponent ?? "Untitled.txt"
+        panel.beginSheetModal(for: window!) { [weak self] resp in
+            if resp == .OK, let url = panel.url { self?.performSave(to: url) }
+        }
+    }
+
+    @discardableResult
+    private func performSave(to url: URL) -> Bool {
+        do {
+            try doc.save(to: url)
+            updateTitle()
+            return true
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Couldn’t save “\(url.lastPathComponent)”."
+            alert.informativeText = "\(error)"
+            alert.runModal()
+            return false
+        }
+    }
+
+    /// Synchronous save used by the close prompt; returns false to cancel close.
+    private func saveSynchronously() -> Bool {
+        let url: URL
+        if let u = doc.fileURL {
+            url = u
+        } else {
+            let panel = NSSavePanel()
+            panel.nameFieldStringValue = "Untitled.txt"
+            guard panel.runModal() == .OK, let u = panel.url else { return false }
+            url = u
+        }
+        return performSave(to: url)
+    }
+
     private var displayName: String { doc.fileURL?.lastPathComponent ?? "Untitled" }
 
     private func updateTitle() {
@@ -125,8 +185,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
             add("New", #selector(AppDelegate.newDocument(_:)), "n", target: coordinator)
             add("Open...", #selector(AppDelegate.openDocument(_:)), "o", target: coordinator)
             add("New Window", #selector(AppDelegate.newDocument(_:)), target: coordinator)
-            add("Save", nil)         // M2
-            add("Save As...", nil)   // M2
+            menu.addItem(.separator())
+            add("Save", #selector(saveDocument(_:)), "s", target: self)
+            add("Save As...", #selector(saveDocumentAs(_:)), target: self)
             menu.addItem(.separator())
             add("Exit", #selector(NSApplication.terminate(_:)), target: NSApp)
         case "Edit":

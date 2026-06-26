@@ -70,4 +70,32 @@ final class TextDocument {
     }
 
     func markSaved() { isModified = false }
+
+    enum SaveError: Error { case cannotCreate, writeFailed, renameFailed }
+
+    /// Writes the document to `url` via a sibling temp file + atomic `rename`,
+    /// so a crash mid-write can't corrupt the target and the mmap'd original
+    /// (a different inode) stays valid. Updates `fileURL` and clears modified.
+    func save(to url: URL) throws {
+        let dir = url.deletingLastPathComponent()
+        let tmp = dir.appendingPathComponent(".\(url.lastPathComponent).np-\(getpid())-tmp")
+
+        let fd = open(tmp.path, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
+        guard fd >= 0 else { throw SaveError.cannotCreate }
+
+        let ok = pieceTable.streamBytes(toFileDescriptor: fd)
+        fsync(fd)
+        close(fd)
+        guard ok else {
+            unlink(tmp.path)
+            throw SaveError.writeFailed
+        }
+        guard rename(tmp.path, url.path) == 0 else {
+            unlink(tmp.path)
+            throw SaveError.renameFailed
+        }
+
+        fileURL = url
+        markSaved()
+    }
 }

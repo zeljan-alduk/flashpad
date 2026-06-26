@@ -177,6 +177,52 @@ final class PieceTable {
         return end
     }
 
+    /// Streams the whole document to a file descriptor, piece by piece. Original
+    /// slices are written straight from the mmap and add slices from the add
+    /// buffer, so nothing is copied into a big intermediate buffer — saving a
+    /// 10 GB file uses a fixed-size write window.
+    func streamBytes(toFileDescriptor fd: Int32) -> Bool {
+        var ok = true
+        let bufSize = 8 << 20
+        var buf = [UInt8](repeating: 0, count: bufSize)
+
+        func writeAll(_ base: UnsafeRawPointer, _ count: Int) -> Bool {
+            var w = 0
+            while w < count {
+                let n = write(fd, base + w, count - w)
+                if n <= 0 { return false }
+                w += n
+            }
+            return true
+        }
+
+        add.withUnsafeBytes { (addRaw: UnsafeRawBufferPointer) in
+            let addBase = addRaw.baseAddress
+            outer: for p in pieces {
+                switch p.source {
+                case .add:
+                    guard let ab = addBase else { ok = false; break outer }
+                    if !writeAll(ab + p.start, p.length) { ok = false; break outer }
+                case .original:
+                    // Stream via pread into a fixed buffer so saving a huge file
+                    // doesn't page the whole original into our resident set.
+                    var off = 0
+                    while off < p.length {
+                        let want = min(p.length - off, bufSize)
+                        let result = buf.withUnsafeMutableBytes { raw -> Int in
+                            let g = original.readChunk(into: raw.baseAddress!, offset: p.start + off, count: want)
+                            if g <= 0 { return g }
+                            return writeAll(raw.baseAddress!, g) ? g : -1
+                        }
+                        if result <= 0 { ok = false; break outer }
+                        off += result
+                    }
+                }
+            }
+        }
+        return ok
+    }
+
     /// Recomputes cached line-feed counts for every original-buffer piece. Used
     /// while the background scan is still discovering newlines, and once before
     /// the first edit, so line counts stay correct for huge files.
