@@ -15,6 +15,12 @@ final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInt
     private var ascent: CGFloat
     private var baseFont: NSFont       // user-chosen font at 100%
     private var zoom: CGFloat = 1.0
+
+    // For a fixed-pitch font we can place the caret on an arbitrarily long line
+    // by simple column arithmetic, so we only ever lay out the visible slice.
+    private var charWidth: CGFloat = 8
+    private var fontIsFixedPitch = true
+    private let longLineThreshold = 4000
     private let leftPadding: CGFloat = 4
     private let textColor = NSColor.black
 
@@ -64,7 +70,21 @@ final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInt
         layer?.backgroundColor = NSColor.white.cgColor
         document.delegate = self
         registerForDraggedTypes([.fileURL])
+        updateFontMetrics()
         updateFrameSize()
+    }
+
+    private func updateFontMetrics() {
+        ascent = font.ascender
+        lineHeight = ceil(font.ascender - font.descender + font.leading) + 2
+        charWidth = max(1, ("0" as NSString).size(withAttributes: [.font: font]).width)
+        fontIsFixedPitch = font.isFixedPitch
+    }
+
+    /// A long line in a fixed-pitch font: handled by column arithmetic instead of
+    /// building a CTLine for the whole (possibly multi-MB) line.
+    private func virtualized(_ start: Int, _ end: Int) -> Bool {
+        fontIsFixedPitch && (end - start) > longLineThreshold
     }
 
     // MARK: - Drag & drop (open files)
@@ -140,19 +160,34 @@ final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInt
     }
 
     /// X position (view coords) of `off` within visual row `i`.
-    private func xForOffset(_ off: Int, inRow i: Int, rowStr: String) -> CGFloat {
-        let byteInRow = max(0, off - rowStart(i))
-        let u16 = utf16Index(in: rowStr, byteOffset: byteInRow)
-        return leftPadding + CTLineGetOffsetForStringIndex(ctLine(rowStr), u16, nil)
+    private func xForOffset(_ off: Int, inRow i: Int) -> CGFloat {
+        let start = rowStart(i)
+        if virtualized(start, rowEnd(i)) {
+            // Column ≈ byte offset (exact for the ASCII typical of long lines).
+            return leftPadding + CGFloat(off - start) * charWidth
+        }
+        let s = rowString(i)
+        let u16 = utf16Index(in: s, byteOffset: max(0, off - start))
+        return leftPadding + CTLineGetOffsetForStringIndex(ctLine(s), u16, nil)
+    }
+
+    /// Document offset nearest x within visual row `i`.
+    private func offsetAtX(_ x: CGFloat, inRow i: Int) -> Int {
+        let start = rowStart(i), end = rowEnd(i)
+        if virtualized(start, end) {
+            let col = max(0, Int(((x - leftPadding) / charWidth).rounded()))
+            return min(end, start + col)
+        }
+        let s = rowString(i)
+        let u16 = CTLineGetStringIndexForPosition(ctLine(s), CGPoint(x: x - leftPadding, y: 0))
+        return start + min(byteOffset(in: s, utf16Index: u16), s.utf8.count)
     }
 
     private func offsetAt(point: NSPoint) -> Int {
         let total = rowCount()
         guard total > 0 else { return 0 }
         let i = max(0, min(total - 1, Int((point.y / lineHeight).rounded(.down))))
-        let s = rowString(i)
-        let u16 = CTLineGetStringIndexForPosition(ctLine(s), CGPoint(x: point.x - leftPadding, y: 0))
-        return rowStart(i) + min(byteOffset(in: s, utf16Index: u16), s.utf8.count)
+        return offsetAtX(point.x, inRow: i)
     }
 
     private func utf16Index(in s: String, byteOffset: Int) -> Int {
@@ -188,25 +223,42 @@ final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInt
 
         for i in first...last {
             let start = rowStart(i), end = rowEnd(i)
-            let s = rowString(i)
-            let ct = ctLine(s)
             let y = CGFloat(i) * lineHeight
 
             if hi > lo, lo <= end, hi >= start {
-                let xs = (lo <= start) ? leftPadding : xForOffset(max(lo, start), inRow: i, rowStr: s)
-                let xe = (hi > end) ? bounds.width : xForOffset(min(hi, end), inRow: i, rowStr: s)
+                let xs = (lo <= start) ? leftPadding : xForOffset(max(lo, start), inRow: i)
+                let xe = (hi > end) ? bounds.width : xForOffset(min(hi, end), inRow: i)
                 NSColor.selectedTextBackgroundColor.setFill()
                 NSRect(x: xs, y: y, width: max(1, xe - xs), height: lineHeight).fill()
             }
 
+            // Text: for a virtualized long line, lay out only the byte window that
+            // intersects the dirty rect; otherwise the whole (short) row.
+            let drawOriginX: CGFloat
+            let s: String
+            if virtualized(start, end) {
+                let col0 = max(0, Int((dirtyRect.minX - leftPadding) / charWidth))
+                let col1 = max(col0, Int((dirtyRect.maxX - leftPadding) / charWidth) + 1)
+                let b0 = min(end, start + col0)
+                let b1 = min(end, start + col1)
+                s = pieceTable.string(in: b0..<b1)
+                drawOriginX = leftPadding + CGFloat(col0) * charWidth
+                let full = CGFloat(end - start) * charWidth + leftPadding * 2
+                if full > maxLineWidth { maxLineWidth = full; scheduleFrameSizeUpdate() }
+            } else {
+                s = rowString(i)
+                drawOriginX = leftPadding
+            }
+            let ct = ctLine(s)
+
             ctx.saveGState()
             ctx.textMatrix = .identity
-            ctx.translateBy(x: leftPadding, y: y + ascent)
+            ctx.translateBy(x: drawOriginX, y: y + ascent)
             ctx.scaleBy(x: 1, y: -1)
             CTLineDraw(ct, ctx)
             ctx.restoreGState()
 
-            if !wrapEnabled {
+            if !wrapEnabled, !virtualized(start, end) {
                 let w = CGFloat(CTLineGetTypographicBounds(ct, nil, nil, nil)) + leftPadding * 2
                 if w > maxLineWidth { maxLineWidth = w; scheduleFrameSizeUpdate() }
             }
@@ -218,8 +270,7 @@ final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInt
         guard caretVisible, !hasSelection, window?.firstResponder === self else { return }
         let i = rowOfOffset(head)
         guard rowCount() > 0 else { return }
-        let s = rowString(i)
-        let x = xForOffset(head, inRow: i, rowStr: s)
+        let x = xForOffset(head, inRow: i)
         let y = CGFloat(i) * lineHeight
         NSColor.black.setFill()
         NSRect(x: x, y: y + 1, width: 1, height: lineHeight - 2).fill()
@@ -349,11 +400,8 @@ final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInt
         let target = i + delta
         if target < 0 { move(to: 0, extend: extend); desiredX = nil; return }
         if target >= rowCount() { move(to: pieceTable.byteCount, extend: extend); desiredX = nil; return }
-        if desiredX == nil { desiredX = xForOffset(head, inRow: i, rowStr: rowString(i)) }
-        let s = rowString(target)
-        let rel = CGPoint(x: (desiredX ?? leftPadding) - leftPadding, y: 0)
-        let u16 = CTLineGetStringIndexForPosition(ctLine(s), rel)
-        let newHead = rowStart(target) + min(byteOffset(in: s, utf16Index: u16), s.utf8.count)
+        if desiredX == nil { desiredX = xForOffset(head, inRow: i) }
+        let newHead = offsetAtX(desiredX ?? leftPadding, inRow: target)
         let saved = desiredX
         move(to: newHead, extend: extend)
         desiredX = saved
@@ -449,7 +497,7 @@ final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInt
     func characterIndex(for point: NSPoint) -> Int { 0 }
     func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
         let i = rowOfOffset(head)
-        let x = xForOffset(head, inRow: i, rowStr: rowString(i))
+        let x = xForOffset(head, inRow: i)
         let inWindow = convert(NSRect(x: x, y: CGFloat(i) * lineHeight, width: 1, height: lineHeight), to: nil)
         return window?.convertToScreen(inWindow) ?? inWindow
     }
@@ -514,8 +562,7 @@ final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInt
 
     private func applyFont() {
         font = NSFont(descriptor: baseFont.fontDescriptor, size: baseFont.pointSize * zoom) ?? baseFont
-        ascent = font.ascender
-        lineHeight = ceil(font.ascender - font.descender + font.leading) + 2
+        updateFontMetrics()
         maxLineWidth = 800
         rebuildWrapIfNeeded()
         updateFrameSize()
@@ -592,7 +639,7 @@ final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInt
     private func ensureCaretVisible() {
         guard rowCount() > 0 else { return }
         let i = rowOfOffset(head)
-        let x = xForOffset(head, inRow: i, rowStr: rowString(i))
+        let x = xForOffset(head, inRow: i)
         scrollToVisible(NSRect(x: x - 2, y: CGFloat(i) * lineHeight, width: 4, height: lineHeight))
     }
 

@@ -37,12 +37,11 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
 
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
-        scrollView.autohidesScrollers = false
-        // Force always-visible (legacy) scrollers like Windows, instead of the
-        // macOS overlay style that fades out when idle.
+        // Legacy (always-visible-when-needed) scrollers instead of the macOS
+        // overlay style that fades out, but auto-hidden when the content fits —
+        // so the horizontal bar only appears when a line is actually too wide.
+        scrollView.autohidesScrollers = true
         scrollView.scrollerStyle = .legacy
-        scrollView.verticalScroller?.scrollerStyle = .legacy
-        scrollView.horizontalScroller?.scrollerStyle = .legacy
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = true
         scrollView.backgroundColor = .white
