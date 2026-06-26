@@ -43,7 +43,10 @@ swift run Notepad /path/to/file # open a file directly
   cut/copy/paste, select-all, live Ln/Col status, dirty-title marker.
   Plus multi-window (one process, one document per window) and low-memory
   pread indexing (~100 MB RSS for a 1.5 GB file).
-- **M2** Save/Save As, Find/Replace, Go To, encoding + line-ending detection,
-  word wrap, font picker, zoom. (Typing-run undo coalescing; precise caret on
-  >20k-char single lines.)
-- **M3** Recent files, drag-drop, print, app icon, packaging/signing.
+- **M2 ✅** Save / Save As (atomic, low-memory streaming), Find / Replace / Go To
+  (memmem search over the piece table), encoding + line-ending detection (BOM,
+  CRLF/LF/CR; native ending on Return), Word Wrap (visual-row renderer, ≤50k
+  lines), Font picker + Zoom.
+- **M3** Recent files, drag-drop, print, app icon, packaging/signing. Polish:
+  typing-run undo coalescing; precise caret on >20k-char single lines; word wrap
+  + UTF-16 editing for very large files.

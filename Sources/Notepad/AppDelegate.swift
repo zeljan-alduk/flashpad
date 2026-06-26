@@ -131,6 +131,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         editMenu.addItem(withTitle: "Go to Line…", action: #selector(EditorWindowController.performGoToLine(_:)), keyEquivalent: "l")
         editItem.submenu = editMenu
 
+        let formatItem = NSMenuItem(); mainMenu.addItem(formatItem)
+        let formatMenu = NSMenu(title: "Format")
+        formatMenu.addItem(withTitle: "Word Wrap", action: #selector(EditorWindowController.toggleWordWrap(_:)), keyEquivalent: "")
+        formatMenu.addItem(withTitle: "Font…", action: #selector(EditorWindowController.openFontPanel(_:)), keyEquivalent: "")
+        formatItem.submenu = formatMenu
+
+        let viewItem = NSMenuItem(); mainMenu.addItem(viewItem)
+        let viewMenu = NSMenu(title: "View")
+        viewMenu.addItem(withTitle: "Zoom In", action: #selector(TextView.zoomIn(_:)), keyEquivalent: "+")
+        viewMenu.addItem(withTitle: "Zoom Out", action: #selector(TextView.zoomOut(_:)), keyEquivalent: "-")
+        viewMenu.addItem(withTitle: "Restore Default Zoom", action: #selector(TextView.resetZoom(_:)), keyEquivalent: "0")
+        viewItem.submenu = viewMenu
+
         NSApp.mainMenu = mainMenu
     }
 }

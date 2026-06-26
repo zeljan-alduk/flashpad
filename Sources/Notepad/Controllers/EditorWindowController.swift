@@ -50,6 +50,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
             self?.statusBar.setPosition(line: line, col: col)
         }
         textView.onModifiedChange = { [weak self] in self?.updateTitle() }
+        textView.onZoom = { [weak self] pct in self?.statusBar.setZoom(pct) }
 
         content.onLayout = { [weak self] bounds in self?.layoutContent(in: bounds) }
         layoutContent(in: content.bounds)
@@ -198,6 +199,23 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
+    @objc func toggleWordWrap(_ sender: Any?) {
+        let want = !textView.wrapEnabled
+        if !textView.setWrap(want), want {
+            let alert = NSAlert()
+            alert.messageText = "Word Wrap is unavailable for very large files."
+            alert.informativeText = "Files with more than \(textView.wrapLineCap) lines stay unwrapped so the app remains responsive."
+            alert.runModal()
+        }
+    }
+
+    @objc func openFontPanel(_ sender: Any?) {
+        let fm = NSFontManager.shared
+        fm.setSelectedFont(textView.currentBaseFont, isMultiple: false)
+        fm.orderFrontFontPanel(self)
+        window?.makeFirstResponder(textView)   // so changeFont: reaches the view
+    }
+
     @objc func performGoToLine(_ sender: Any?) {
         let alert = NSAlert()
         alert.messageText = "Go to line:"
@@ -250,11 +268,14 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
             menu.addItem(.separator())
             add("Select All", #selector(NSText.selectAll(_:)), "a")
         case "Format":
-            menu.addItem(withTitle: "Word Wrap", action: nil, keyEquivalent: "")
-            menu.addItem(withTitle: "Font...", action: nil, keyEquivalent: "")
+            let wrap = menu.addItem(withTitle: "Word Wrap", action: #selector(toggleWordWrap(_:)), keyEquivalent: "")
+            wrap.target = self
+            wrap.state = textView.wrapEnabled ? .on : .off
+            add("Font...", #selector(openFontPanel(_:)), target: self)
         case "View":
-            menu.addItem(withTitle: "Zoom", action: nil, keyEquivalent: "")
-            menu.addItem(withTitle: "Status Bar", action: nil, keyEquivalent: "")
+            add("Zoom In", #selector(TextView.zoomIn(_:)), "+")
+            add("Zoom Out", #selector(TextView.zoomOut(_:)), "-")
+            add("Restore Default Zoom", #selector(TextView.resetZoom(_:)), "0")
         case "Help":
             menu.addItem(withTitle: "About Notepad", action: nil, keyEquivalent: "")
         default:

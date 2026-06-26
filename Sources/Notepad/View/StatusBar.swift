@@ -58,4 +58,5 @@ final class StatusBar: NSView {
 
     func setEncoding(_ text: String) { encoding.stringValue = text; needsLayout = true }
     func setLineEnding(_ text: String) { lineEnding.stringValue = text; needsLayout = true }
+    func setZoom(_ percent: Int) { zoom.stringValue = "\(percent)%"; needsLayout = true }
 }

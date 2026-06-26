@@ -2,17 +2,24 @@ import AppKit
 
 /// Editable viewport renderer.
 ///
-/// Draws only the visible lines each frame with Core Text, so editing and
-/// scrolling stay cheap on huge files. Caret/selection are byte offsets into the
-/// document; the `PieceTable` answers all line geometry.
+/// Everything is addressed in **visual rows**. With word wrap off, row i is just
+/// document line i. With wrap on, a long document line is split into several
+/// rows (`wrapRows`). Drawing, caret, hit-testing and vertical movement all work
+/// in row space, so the two modes share one code path. Only the visible rows are
+/// laid out each frame, so scrolling/editing stay cheap on huge files.
 final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInterfaceValidations {
     private(set) var document: TextDocument
 
-    let font: NSFont
-    let lineHeight: CGFloat
-    private let ascent: CGFloat
+    private(set) var font: NSFont
+    private(set) var lineHeight: CGFloat
+    private var ascent: CGFloat
+    private var baseFont: NSFont       // user-chosen font at 100%
+    private var zoom: CGFloat = 1.0
     private let leftPadding: CGFloat = 4
     private let textColor = NSColor.black
+
+    var currentBaseFont: NSFont { baseFont }
+    var onZoom: ((Int) -> Void)?
 
     // Selection as a pair of byte offsets. anchor == head ⇒ a caret.
     private var anchor = 0
@@ -21,17 +28,25 @@ final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInt
     private var selHigh: Int { max(anchor, head) }
     private var hasSelection: Bool { anchor != head }
 
-    /// Preserves the target x across vertical moves.
-    private var desiredX: CGFloat?
-
+    private var desiredX: CGFloat?     // preserves target x across vertical moves
     private var caretVisible = true
     private var blinkTimer: Timer?
     private var maxLineWidth: CGFloat = 800
 
-    /// Reports caret line/column (1-based) for the status bar.
     var onCaret: ((_ line: Int, _ col: Int) -> Void)?
-    /// Fires when the modified flag may have changed (title dirty marker).
     var onModifiedChange: (() -> Void)?
+
+    // Word wrap: a flat list of visual rows. Empty/unused when wrap is off.
+    private struct WrapRow { let start: Int; let end: Int }
+    private(set) var wrapEnabled = false
+    private var wrapRows: [WrapRow] = []
+    /// Wrap relayouts the whole document, so cap it to keep that snappy. Huge
+    /// files (the scroll-heavy case) stay unwrapped.
+    let wrapLineCap = 50_000
+
+    /// Cap on bytes laid out for one visual row, so a newline-free file can't
+    /// build a multi-GB CTLine.
+    private let maxRenderBytes = 20_000
 
     init(document: TextDocument) {
         self.document = document
@@ -39,6 +54,7 @@ final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInt
             ?? NSFont(name: "Menlo", size: 14)
             ?? NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
         self.font = f
+        self.baseFont = f
         self.ascent = f.ascender
         self.lineHeight = ceil(f.ascender - f.descender + f.leading) + 2
         super.init(frame: .zero)
@@ -54,6 +70,7 @@ final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInt
         document = doc
         doc.delegate = self
         anchor = 0; head = 0; desiredX = nil
+        rebuildWrapIfNeeded()
         updateFrameSize()
         scroll(.zero)
         needsDisplay = true
@@ -64,60 +81,61 @@ final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInt
     override var isOpaque: Bool { true }
     override var acceptsFirstResponder: Bool { true }
 
-    override func becomeFirstResponder() -> Bool {
-        startBlink(); return super.becomeFirstResponder()
-    }
+    override func becomeFirstResponder() -> Bool { startBlink(); return super.becomeFirstResponder() }
     override func resignFirstResponder() -> Bool {
         blinkTimer?.invalidate(); caretVisible = false; needsDisplay = true
         return super.resignFirstResponder()
     }
 
-    // The Edit menu's Undo/Redo route through the responder chain to this.
     override var undoManager: UndoManager? { document.undoManager }
-
-    // MARK: - Geometry helpers
 
     private var pieceTable: PieceTable { document.pieceTable }
 
-    /// Hard cap on bytes rendered/measured for a single line. Word-wrap is off
-    /// (Notepad default), so a pathological newline-free file could otherwise
-    /// build a multi-GB CTLine. No screen shows 20k columns anyway.
-    private let maxRenderBytes = 20_000
+    // MARK: - Visual row model
 
-    private func lineString(_ line: Int) -> String {
-        let start = pieceTable.lineStart(line)
-        let end = min(pieceTable.lineEnd(line), start + maxRenderBytes)
-        return pieceTable.string(in: start..<end)
+    private func rowCount() -> Int { wrapEnabled ? wrapRows.count : pieceTable.lineCount }
+    private func rowStart(_ i: Int) -> Int { wrapEnabled ? wrapRows[i].start : pieceTable.lineStart(i) }
+    private func rowEnd(_ i: Int) -> Int { wrapEnabled ? wrapRows[i].end : pieceTable.lineEnd(i) }
+
+    private func rowString(_ i: Int) -> String {
+        let s = rowStart(i)
+        let e = min(rowEnd(i), s + maxRenderBytes)
+        return pieceTable.string(in: s..<e)
     }
+
+    private func rowOfOffset(_ off: Int) -> Int {
+        if !wrapEnabled { return pieceTable.line(atOffset: off) }
+        guard !wrapRows.isEmpty else { return 0 }
+        var lo = 0, hi = wrapRows.count - 1, hit = 0
+        while lo <= hi {
+            let m = (lo + hi) / 2
+            if wrapRows[m].start <= off { hit = m; lo = m + 1 } else { hi = m - 1 }
+        }
+        return hit
+    }
+
+    // MARK: - Core Text helpers
 
     private func ctLine(_ s: String) -> CTLine {
-        let attr = NSAttributedString(string: s, attributes: [
-            .font: font, .foregroundColor: textColor,
-        ])
-        return CTLineCreateWithAttributedString(attr)
+        CTLineCreateWithAttributedString(NSAttributedString(string: s, attributes: [
+            .font: font, .foregroundColor: textColor]))
     }
 
-    /// X position (view coords) of a document offset on its line.
-    private func xFor(offset: Int, line: Int, lineStr: String) -> CGFloat {
-        let byteInLine = offset - pieceTable.lineStart(line)
-        let u16 = utf16Index(in: lineStr, byteOffset: byteInLine)
-        let x = CTLineGetOffsetForStringIndex(ctLine(lineStr), u16, nil)
-        return leftPadding + x
+    /// X position (view coords) of `off` within visual row `i`.
+    private func xForOffset(_ off: Int, inRow i: Int, rowStr: String) -> CGFloat {
+        let byteInRow = max(0, off - rowStart(i))
+        let u16 = utf16Index(in: rowStr, byteOffset: byteInRow)
+        return leftPadding + CTLineGetOffsetForStringIndex(ctLine(rowStr), u16, nil)
     }
 
-    /// Document offset nearest a point.
     private func offsetAt(point: NSPoint) -> Int {
-        let total = pieceTable.lineCount
-        var line = Int((point.y / lineHeight).rounded(.down))
-        line = max(0, min(total - 1, line))
-        let s = lineString(line)
-        let rel = CGPoint(x: point.x - leftPadding, y: 0)
-        let u16 = CTLineGetStringIndexForPosition(ctLine(s), rel)
-        let byteInLine = byteOffset(in: s, utf16Index: u16)
-        return pieceTable.lineStart(line) + min(byteInLine, s.utf8.count)
+        let total = rowCount()
+        guard total > 0 else { return 0 }
+        let i = max(0, min(total - 1, Int((point.y / lineHeight).rounded(.down))))
+        let s = rowString(i)
+        let u16 = CTLineGetStringIndexForPosition(ctLine(s), CGPoint(x: point.x - leftPadding, y: 0))
+        return rowStart(i) + min(byteOffset(in: s, utf16Index: u16), s.utf8.count)
     }
-
-    // MARK: - UTF-8 <-> UTF-16 within a line
 
     private func utf16Index(in s: String, byteOffset: Int) -> Int {
         if byteOffset <= 0 { return 0 }
@@ -140,7 +158,7 @@ final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInt
         NSColor.white.setFill()
         dirtyRect.fill()
 
-        let total = pieceTable.lineCount
+        let total = rowCount()
         guard total > 0 else { drawCaretIfNeeded(); return }
 
         let first = max(0, Int((dirtyRect.minY / lineHeight).rounded(.down)))
@@ -150,27 +168,19 @@ final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInt
         let ctx = NSGraphicsContext.current!.cgContext
         let lo = selLow, hi = selHigh
 
-        for line in first...last {
-            let start = pieceTable.lineStart(line)
-            let end = pieceTable.lineEnd(line)
-            let s = lineString(line)
+        for i in first...last {
+            let start = rowStart(i), end = rowEnd(i)
+            let s = rowString(i)
             let ct = ctLine(s)
-            let y = CGFloat(line) * lineHeight
+            let y = CGFloat(i) * lineHeight
 
-            // Selection highlight for this line.
             if hi > lo, lo <= end, hi >= start {
-                let xs = (lo <= start) ? leftPadding : xFor(offset: max(lo, start), line: line, lineStr: s)
-                var xe: CGFloat
-                if hi > end {            // selection runs through the newline
-                    xe = bounds.width
-                } else {
-                    xe = xFor(offset: min(hi, end), line: line, lineStr: s)
-                }
+                let xs = (lo <= start) ? leftPadding : xForOffset(max(lo, start), inRow: i, rowStr: s)
+                let xe = (hi > end) ? bounds.width : xForOffset(min(hi, end), inRow: i, rowStr: s)
                 NSColor.selectedTextBackgroundColor.setFill()
                 NSRect(x: xs, y: y, width: max(1, xe - xs), height: lineHeight).fill()
             }
 
-            // Text.
             ctx.saveGState()
             ctx.textMatrix = .identity
             ctx.translateBy(x: leftPadding, y: y + ascent)
@@ -178,21 +188,72 @@ final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInt
             CTLineDraw(ct, ctx)
             ctx.restoreGState()
 
-            let w = CGFloat(CTLineGetTypographicBounds(ct, nil, nil, nil)) + leftPadding * 2
-            if w > maxLineWidth { maxLineWidth = w; scheduleFrameSizeUpdate() }
+            if !wrapEnabled {
+                let w = CGFloat(CTLineGetTypographicBounds(ct, nil, nil, nil)) + leftPadding * 2
+                if w > maxLineWidth { maxLineWidth = w; scheduleFrameSizeUpdate() }
+            }
         }
-
         drawCaretIfNeeded()
     }
 
     private func drawCaretIfNeeded() {
         guard caretVisible, !hasSelection, window?.firstResponder === self else { return }
-        let line = pieceTable.line(atOffset: head)
-        let s = lineString(line)
-        let x = xFor(offset: head, line: line, lineStr: s)
-        let y = CGFloat(line) * lineHeight
+        let i = rowOfOffset(head)
+        guard rowCount() > 0 else { return }
+        let s = rowString(i)
+        let x = xForOffset(head, inRow: i, rowStr: s)
+        let y = CGFloat(i) * lineHeight
         NSColor.black.setFill()
         NSRect(x: x, y: y + 1, width: 1, height: lineHeight - 2).fill()
+    }
+
+    // MARK: - Word wrap
+
+    @discardableResult
+    func setWrap(_ on: Bool) -> Bool {
+        if on, pieceTable.lineCount > wrapLineCap { return false }
+        wrapEnabled = on
+        enclosingScrollView?.hasHorizontalScroller = !on
+        if !on { wrapRows = [] } else { buildWrapRows() }
+        maxLineWidth = 800
+        updateFrameSize()
+        needsDisplay = true
+        ensureCaretVisible()
+        return true
+    }
+
+    /// Rebuild wrap layout after anything that changes widths or content.
+    private func rebuildWrapIfNeeded() {
+        guard wrapEnabled else { return }
+        if pieceTable.lineCount > wrapLineCap { setWrap(false); return }  // grew too big
+        buildWrapRows()
+        updateFrameSize()
+        needsDisplay = true
+    }
+
+    private func buildWrapRows() {
+        wrapRows.removeAll(keepingCapacity: true)
+        let width = max(40, (enclosingScrollView?.contentSize.width ?? bounds.width) - leftPadding * 2)
+        let n = pieceTable.lineCount
+        for line in 0..<n {
+            let start = pieceTable.lineStart(line)
+            let end = pieceTable.lineEnd(line)
+            if end <= start { wrapRows.append(WrapRow(start: start, end: start)); continue }
+            let s = pieceTable.string(in: start..<min(end, start + maxRenderBytes))
+            let attr = NSAttributedString(string: s, attributes: [.font: font])
+            let ts = CTTypesetterCreateWithAttributedString(attr)
+            let len = (s as NSString).length
+            var idx = 0
+            while idx < len {
+                var cnt = CTTypesetterSuggestLineBreak(ts, idx, Double(width))
+                if cnt <= 0 { cnt = 1 }
+                let segEnd = min(idx + cnt, len)
+                let sByte = start + byteOffset(in: s, utf16Index: idx)
+                let eByte = start + byteOffset(in: s, utf16Index: segEnd)
+                wrapRows.append(WrapRow(start: sByte, end: eByte))
+                idx = segEnd
+            }
+        }
     }
 
     // MARK: - Frame sizing
@@ -208,8 +269,10 @@ final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInt
     }
 
     private func updateFrameSize() {
-        let h = max(CGFloat(pieceTable.lineCount) * lineHeight, enclosingScrollView?.contentSize.height ?? bounds.height)
-        let w = max(maxLineWidth, enclosingScrollView?.contentSize.width ?? bounds.width)
+        let viewportH = enclosingScrollView?.contentSize.height ?? bounds.height
+        let viewportW = enclosingScrollView?.contentSize.width ?? bounds.width
+        let h = max(CGFloat(rowCount()) * lineHeight, viewportH)
+        let w = wrapEnabled ? viewportW : max(maxLineWidth, viewportW)
         if frame.size.height != h || frame.size.width != w {
             setFrameSize(NSSize(width: w, height: h))
         }
@@ -242,55 +305,54 @@ final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInt
         guard off < n else { return n }
         let line = pieceTable.line(atOffset: off)
         let end = pieceTable.lineEnd(line)
-        if off >= end { return pieceTable.lineStart(line + 1) }  // cross newline
-        let s = lineString(line)
+        if off >= end { return pieceTable.lineStart(line + 1) }   // cross newline
+        let s = pieceTable.string(in: pieceTable.lineStart(line)..<end)
         let rel = off - pieceTable.lineStart(line)
         guard let i = s.utf8.index(s.utf8.startIndex, offsetBy: rel, limitedBy: s.utf8.endIndex),
               let si = i.samePosition(in: s), si < s.endIndex else { return end }
-        let nextChar = s.index(after: si)
-        return pieceTable.lineStart(line) + s[..<nextChar].utf8.count
+        return pieceTable.lineStart(line) + s[..<s.index(after: si)].utf8.count
     }
 
     private func prevOffset(before off: Int) -> Int {
         guard off > 0 else { return 0 }
         let line = pieceTable.line(atOffset: off)
         let start = pieceTable.lineStart(line)
-        if off <= start { return pieceTable.lineEnd(line - 1) }  // cross newline
-        let s = lineString(line)
+        if off <= start { return pieceTable.lineEnd(line - 1) }   // cross newline
+        let s = pieceTable.string(in: start..<pieceTable.lineEnd(line))
         let rel = off - start
         guard let i = s.utf8.index(s.utf8.startIndex, offsetBy: rel, limitedBy: s.utf8.endIndex),
               let si = i.samePosition(in: s) else { return start }
-        let prevChar = s.index(before: si)
-        return start + s[..<prevChar].utf8.count
+        return start + s[..<s.index(before: si)].utf8.count
     }
 
     private func verticalMove(by delta: Int, extend: Bool) {
-        let line = pieceTable.line(atOffset: head)
-        let target = line + delta
-        if target < 0 { move(to: 0, extend: extend); return }
-        if target >= pieceTable.lineCount { move(to: pieceTable.byteCount, extend: extend); return }
-        if desiredX == nil {
-            desiredX = xFor(offset: head, line: line, lineStr: lineString(line))
-        }
-        let s = lineString(target)
+        let i = rowOfOffset(head)
+        let target = i + delta
+        if target < 0 { move(to: 0, extend: extend); desiredX = nil; return }
+        if target >= rowCount() { move(to: pieceTable.byteCount, extend: extend); desiredX = nil; return }
+        if desiredX == nil { desiredX = xForOffset(head, inRow: i, rowStr: rowString(i)) }
+        let s = rowString(target)
         let rel = CGPoint(x: (desiredX ?? leftPadding) - leftPadding, y: 0)
         let u16 = CTLineGetStringIndexForPosition(ctLine(s), rel)
-        let newHead = pieceTable.lineStart(target) + min(byteOffset(in: s, utf16Index: u16), s.utf8.count)
+        let newHead = rowStart(target) + min(byteOffset(in: s, utf16Index: u16), s.utf8.count)
         let saved = desiredX
         move(to: newHead, extend: extend)
-        desiredX = saved   // preserve across consecutive vertical moves
+        desiredX = saved
     }
 
-    // MARK: - Editing primitives
+    private func rowHome(_ extend: Bool) { move(to: rowStart(rowOfOffset(head)), extend: extend); desiredX = nil }
+    private func rowEndEdge(_ extend: Bool) { move(to: rowEnd(rowOfOffset(head)), extend: extend); desiredX = nil }
+
+    // MARK: - Editing
 
     private func replaceSelection(with text: String) {
         document.replace(selLow..<selHigh, with: text)
-        // caret placement comes back via the delegate callback
     }
 
     func document(_ doc: TextDocument, didEditPlacingCaretAt caret: Int) {
         desiredX = nil
         anchor = caret; head = caret
+        rebuildWrapIfNeeded()
         updateFrameSize()
         needsDisplay = true
         restartBlink()
@@ -300,11 +362,12 @@ final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInt
     }
 
     func documentMetricsDidChange(_ doc: TextDocument) {
+        rebuildWrapIfNeeded()
         updateFrameSize()
         needsDisplay = true
     }
 
-    // MARK: - NSTextInputClient (text entry)
+    // MARK: - NSTextInputClient
 
     func insertText(_ string: Any, replacementRange: NSRange) {
         let text = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
@@ -314,14 +377,15 @@ final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInt
 
     override func doCommand(by selector: Selector) {
         switch selector {
-        case #selector(insertNewline(_:)): replaceSelection(with: document.newline)
+        case #selector(insertNewline(_:)), #selector(insertNewlineIgnoringFieldEditor(_:)):
+            replaceSelection(with: document.newline)
         case #selector(insertTab(_:)): replaceSelection(with: "\t")
         case #selector(deleteBackward(_:)):
             if hasSelection { replaceSelection(with: "") }
-            else { let p = prevOffset(before: head); document.replace(p..<head, with: "") }
+            else { document.replace(prevOffset(before: head)..<head, with: "") }
         case #selector(deleteForward(_:)):
             if hasSelection { replaceSelection(with: "") }
-            else { let nx = nextOffset(after: head); document.replace(head..<nx, with: "") }
+            else { document.replace(head..<nextOffset(after: head), with: "") }
         case #selector(moveLeft(_:)):
             move(to: hasSelection ? selLow : prevOffset(before: head), extend: false); desiredX = nil
         case #selector(moveRight(_:)):
@@ -334,36 +398,28 @@ final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInt
         case #selector(moveDown(_:)): verticalMove(by: 1, extend: false)
         case #selector(moveUpAndModifySelection(_:)): verticalMove(by: -1, extend: true)
         case #selector(moveDownAndModifySelection(_:)): verticalMove(by: 1, extend: true)
-        case #selector(moveToBeginningOfLine(_:)), #selector(moveToLeftEndOfLine(_:)):
-            move(to: pieceTable.lineStart(pieceTable.line(atOffset: head)), extend: false); desiredX = nil
-        case #selector(moveToEndOfLine(_:)), #selector(moveToRightEndOfLine(_:)):
-            move(to: pieceTable.lineEnd(pieceTable.line(atOffset: head)), extend: false); desiredX = nil
-        case #selector(moveToBeginningOfLineAndModifySelection(_:)), #selector(moveToLeftEndOfLineAndModifySelection(_:)):
-            move(to: pieceTable.lineStart(pieceTable.line(atOffset: head)), extend: true); desiredX = nil
-        case #selector(moveToEndOfLineAndModifySelection(_:)), #selector(moveToRightEndOfLineAndModifySelection(_:)):
-            move(to: pieceTable.lineEnd(pieceTable.line(atOffset: head)), extend: true); desiredX = nil
+        case #selector(moveToBeginningOfLine(_:)), #selector(moveToLeftEndOfLine(_:)): rowHome(false)
+        case #selector(moveToEndOfLine(_:)), #selector(moveToRightEndOfLine(_:)): rowEndEdge(false)
+        case #selector(moveToBeginningOfLineAndModifySelection(_:)), #selector(moveToLeftEndOfLineAndModifySelection(_:)): rowHome(true)
+        case #selector(moveToEndOfLineAndModifySelection(_:)), #selector(moveToRightEndOfLineAndModifySelection(_:)): rowEndEdge(true)
         case #selector(moveToBeginningOfDocument(_:)): move(to: 0, extend: false); desiredX = nil
         case #selector(moveToEndOfDocument(_:)): move(to: pieceTable.byteCount, extend: false); desiredX = nil
         case #selector(moveToBeginningOfDocumentAndModifySelection(_:)): move(to: 0, extend: true)
         case #selector(moveToEndOfDocumentAndModifySelection(_:)): move(to: pieceTable.byteCount, extend: true)
-        case #selector(scrollPageUp(_:)), #selector(pageUp(_:)): verticalMove(by: -visibleLineCount, extend: false)
-        case #selector(scrollPageDown(_:)), #selector(pageDown(_:)): verticalMove(by: visibleLineCount, extend: false)
-        case #selector(pageUpAndModifySelection(_:)): verticalMove(by: -visibleLineCount, extend: true)
-        case #selector(pageDownAndModifySelection(_:)): verticalMove(by: visibleLineCount, extend: true)
-        case #selector(insertNewlineIgnoringFieldEditor(_:)): replaceSelection(with: document.newline)
+        case #selector(scrollPageUp(_:)), #selector(pageUp(_:)): verticalMove(by: -visibleRowCount, extend: false)
+        case #selector(scrollPageDown(_:)), #selector(pageDown(_:)): verticalMove(by: visibleRowCount, extend: false)
+        case #selector(pageUpAndModifySelection(_:)): verticalMove(by: -visibleRowCount, extend: true)
+        case #selector(pageDownAndModifySelection(_:)): verticalMove(by: visibleRowCount, extend: true)
         default: break
         }
     }
 
-    private var visibleLineCount: Int {
+    private var visibleRowCount: Int {
         max(1, Int((enclosingScrollView?.contentSize.height ?? bounds.height) / lineHeight) - 1)
     }
 
-    override func keyDown(with event: NSEvent) {
-        interpretKeyEvents([event])
-    }
+    override func keyDown(with event: NSEvent) { interpretKeyEvents([event]) }
 
-    // Required NSTextInputClient stubs (no marked-text/IME composition in M1).
     func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {}
     func unmarkText() {}
     func hasMarkedText() -> Bool { false }
@@ -373,10 +429,9 @@ final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInt
     func validAttributesForMarkedText() -> [NSAttributedString.Key] { [] }
     func characterIndex(for point: NSPoint) -> Int { 0 }
     func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
-        let line = pieceTable.line(atOffset: head)
-        let x = xFor(offset: head, line: line, lineStr: lineString(line))
-        let rectInView = NSRect(x: x, y: CGFloat(line) * lineHeight, width: 1, height: lineHeight)
-        let inWindow = convert(rectInView, to: nil)
+        let i = rowOfOffset(head)
+        let x = xForOffset(head, inRow: i, rowStr: rowString(i))
+        let inWindow = convert(NSRect(x: x, y: CGFloat(i) * lineHeight, width: 1, height: lineHeight), to: nil)
         return window?.convertToScreen(inWindow) ?? inWindow
     }
 
@@ -384,48 +439,33 @@ final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInt
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
-        let p = convert(event.locationInWindow, from: nil)
-        let off = offsetAt(point: p)
-        if event.modifierFlags.contains(.shift) {
-            move(to: off, extend: true)
-        } else {
-            setSelection(anchor: off, head: off)
-        }
+        let off = offsetAt(point: convert(event.locationInWindow, from: nil))
+        if event.modifierFlags.contains(.shift) { move(to: off, extend: true) }
+        else { setSelection(anchor: off, head: off) }
         desiredX = nil
     }
 
     override func mouseDragged(with event: NSEvent) {
-        let p = convert(event.locationInWindow, from: nil)
         autoscroll(with: event)
-        move(to: offsetAt(point: p), extend: true)
+        move(to: offsetAt(point: convert(event.locationInWindow, from: nil)), extend: true)
         desiredX = nil
     }
 
-    // MARK: - Standard editing actions (Edit menu / shortcuts)
+    // MARK: - Standard editing actions
 
-    @objc override func selectAll(_ sender: Any?) {
-        setSelection(anchor: 0, head: pieceTable.byteCount)
-    }
+    @objc override func selectAll(_ sender: Any?) { setSelection(anchor: 0, head: pieceTable.byteCount) }
 
     @objc func copy(_ sender: Any?) {
         guard hasSelection else { return }
-        let text = pieceTable.string(in: selLow..<selHigh)
         let pb = NSPasteboard.general
         pb.clearContents()
-        pb.setString(text, forType: .string)
+        pb.setString(pieceTable.string(in: selLow..<selHigh), forType: .string)
     }
-
-    @objc func cut(_ sender: Any?) {
-        guard hasSelection else { return }
-        copy(sender)
-        replaceSelection(with: "")
-    }
-
+    @objc func cut(_ sender: Any?) { guard hasSelection else { return }; copy(sender); replaceSelection(with: "") }
     @objc func paste(_ sender: Any?) {
         guard let text = NSPasteboard.general.string(forType: .string) else { return }
         replaceSelection(with: text)
     }
-
     @objc func undo(_ sender: Any?) { document.undoManager.undo() }
     @objc func redo(_ sender: Any?) { document.undoManager.redo() }
 
@@ -439,6 +479,26 @@ final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInt
         }
     }
 
+    // MARK: - Font & Zoom
+
+    func setBaseFont(_ f: NSFont) { baseFont = f; applyFont() }
+    @objc func changeFont(_ sender: Any?) { setBaseFont(NSFontManager.shared.convert(baseFont)) }
+    @objc func zoomIn(_ sender: Any?)  { zoom = min(5.0, zoom + 0.1); applyFont() }
+    @objc func zoomOut(_ sender: Any?) { zoom = max(0.3, zoom - 0.1); applyFont() }
+    @objc func resetZoom(_ sender: Any?) { zoom = 1.0; applyFont() }
+
+    private func applyFont() {
+        font = NSFont(descriptor: baseFont.fontDescriptor, size: baseFont.pointSize * zoom) ?? baseFont
+        ascent = font.ascender
+        lineHeight = ceil(font.ascender - font.descender + font.leading) + 2
+        maxLineWidth = 800
+        rebuildWrapIfNeeded()
+        updateFrameSize()
+        needsDisplay = true
+        ensureCaretVisible()
+        onZoom?(Int((zoom * 100).rounded()))
+    }
+
     // MARK: - Find / Replace / Go To
 
     var selectionText: String { pieceTable.string(in: selLow..<selHigh) }
@@ -447,29 +507,22 @@ final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInt
     func findNext(_ needle: String, caseSensitive: Bool, forward: Bool) -> Bool {
         let bytes = Array(needle.utf8)
         guard !bytes.isEmpty else { return false }
-        var range: Range<Int>?
-        if forward {
-            range = pieceTable.nextMatch(of: bytes, from: selHigh, caseSensitive: caseSensitive)
-                 ?? pieceTable.nextMatch(of: bytes, from: 0, caseSensitive: caseSensitive)   // wrap
-        } else {
-            range = pieceTable.prevMatch(of: bytes, before: selLow, caseSensitive: caseSensitive)
-                 ?? pieceTable.prevMatch(of: bytes, before: pieceTable.byteCount, caseSensitive: caseSensitive)
-        }
+        let range: Range<Int>? = forward
+            ? (pieceTable.nextMatch(of: bytes, from: selHigh, caseSensitive: caseSensitive)
+               ?? pieceTable.nextMatch(of: bytes, from: 0, caseSensitive: caseSensitive))
+            : (pieceTable.prevMatch(of: bytes, before: selLow, caseSensitive: caseSensitive)
+               ?? pieceTable.prevMatch(of: bytes, before: pieceTable.byteCount, caseSensitive: caseSensitive))
         guard let r = range else { return false }
         setSelection(anchor: r.lowerBound, head: r.upperBound)
         desiredX = nil
         return true
     }
 
-    /// If the current selection is the search term, replace it; then find next.
     @discardableResult
     func replaceThenFind(_ needle: String, with replacement: String, caseSensitive: Bool) -> Bool {
         let sel = selectionText
-        let isMatch = caseSensitive ? (sel == needle)
-                                    : (sel.lowercased() == needle.lowercased())
-        if hasSelection, isMatch {
-            document.replace(selLow..<selHigh, with: replacement)
-        }
+        let isMatch = caseSensitive ? (sel == needle) : (sel.lowercased() == needle.lowercased())
+        if hasSelection, isMatch { document.replace(selLow..<selHigh, with: replacement) }
         return findNext(needle, caseSensitive: caseSensitive, forward: true)
     }
 
@@ -478,12 +531,11 @@ final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInt
         guard !bytes.isEmpty else { return 0 }
         let replBytes = replacement.utf8.count
         document.undoManager.beginUndoGrouping()
-        var count = 0
-        var from = 0
+        var count = 0, from = 0
         while let r = pieceTable.nextMatch(of: bytes, from: from, caseSensitive: caseSensitive) {
             document.replace(r, with: replacement)
             count += 1
-            from = r.lowerBound + replBytes   // continue past the inserted text
+            from = r.lowerBound + replBytes
         }
         document.undoManager.endUndoGrouping()
         return count
@@ -502,28 +554,36 @@ final class TextView: NSView, NSTextInputClient, TextDocumentDelegate, NSUserInt
         blinkTimer?.invalidate()
         caretVisible = true
         blinkTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            self.caretVisible.toggle()
-            self.needsDisplay = true
+            self?.caretVisible.toggle()
+            self?.needsDisplay = true
         }
         needsDisplay = true
     }
-    private func restartBlink() {
-        if window?.firstResponder === self { startBlink() }
-    }
+    private func restartBlink() { if window?.firstResponder === self { startBlink() } }
 
-    // MARK: - Scroll caret into view
+    // MARK: - Scroll caret into view + resize
 
     private func ensureCaretVisible() {
-        let line = pieceTable.line(atOffset: head)
-        let s = lineString(line)
-        let x = xFor(offset: head, line: line, lineStr: s)
-        let rect = NSRect(x: x - 2, y: CGFloat(line) * lineHeight, width: 4, height: lineHeight)
-        scrollToVisible(rect)
+        guard rowCount() > 0 else { return }
+        let i = rowOfOffset(head)
+        let x = xForOffset(head, inRow: i, rowStr: rowString(i))
+        scrollToVisible(NSRect(x: x - 2, y: CGFloat(i) * lineHeight, width: 4, height: lineHeight))
     }
 
     override func viewDidMoveToSuperview() {
         super.viewDidMoveToSuperview()
+        if let clip = enclosingScrollView?.contentView {
+            clip.postsFrameChangedNotifications = true
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(clipResized),
+                name: NSView.frameDidChangeNotification, object: clip)
+        }
+        updateFrameSize()
+    }
+
+    @objc private func clipResized() {
+        // Wrap width follows the viewport.
+        if wrapEnabled { rebuildWrapIfNeeded() }
         updateFrameSize()
     }
 }
