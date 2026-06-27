@@ -28,18 +28,29 @@ final class TextDocument {
     /// URL backing this document, or nil for an untitled buffer.
     var fileURL: URL?
 
-    /// Detected byte format (encoding, BOM, line ending).
-    let format: DetectedFormat
+    /// Encoding used to read this file and to write it back.
+    var encoding: FileEncoding
     /// Line ending inserted when the user presses Return.
-    var newline: String { format.newline }
+    var lineEnding: LineEndingInfo
+    var newline: String { lineEnding.newline }
+    var encodingLabel: String { encoding.label }
+    var lineEndingLabel: String { lineEnding.label }
 
-    init(file: MappedFile, index: LineIndex, url: URL?) {
+    /// Transcoded UTF-8 backing file to delete when this document closes.
+    private let tempURL: URL?
+
+    init(file: MappedFile, index: LineIndex, url: URL?,
+         encoding: FileEncoding = .utf8,
+         lineEnding: LineEndingInfo = .crlf,
+         contentStart: Int = 0,
+         tempURL: URL? = nil) {
         self.file = file
         self.index = index
         self.fileURL = url
-        let fmt = detectFormat(file)
-        self.format = fmt
-        self.pieceTable = PieceTable(original: file, index: index, contentStart: fmt.contentStart)
+        self.encoding = encoding
+        self.lineEnding = lineEnding
+        self.tempURL = tempURL
+        self.pieceTable = PieceTable(original: file, index: index, contentStart: contentStart)
 
         // We manage undo grouping ourselves so a run of typed characters folds
         // into a single undo step (see replace(_:with:coalesce:)).
@@ -59,6 +70,10 @@ final class TextDocument {
         let index = LineIndex(file: file)
         index.buildSynchronously()
         return TextDocument(file: file, index: index, url: nil)
+    }
+
+    deinit {
+        if let tempURL { try? FileManager.default.removeItem(at: tempURL) }
     }
 
     var byteCount: Int { pieceTable.byteCount }
@@ -130,32 +145,39 @@ final class TextDocument {
 
     enum SaveError: Error { case cannotCreate, writeFailed, renameFailed }
 
-    /// Writes the document to `url` via a sibling temp file + atomic `rename`,
-    /// so a crash mid-write can't corrupt the target and the mmap'd original
-    /// (a different inode) stays valid. Updates `fileURL` and clears modified.
-    func save(to url: URL) throws {
+    /// Writes the document to `url` in `encoding` via a sibling temp file + atomic
+    /// `rename`. UTF-8/UTF-8-BOM stream from the piece table (low memory, any
+    /// size); UTF-16/ANSI transcode the whole document (rare, typically small).
+    func save(to url: URL, as encoding: FileEncoding) throws {
         let dir = url.deletingLastPathComponent()
         let tmp = dir.appendingPathComponent(".\(url.lastPathComponent).np-\(getpid())-tmp")
 
         let fd = open(tmp.path, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
         guard fd >= 0 else { throw SaveError.cannotCreate }
 
-        if !format.bomBytes.isEmpty {
-            _ = format.bomBytes.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+        var ok = true
+        switch encoding {
+        case .utf8, .utf8BOM:
+            if encoding == .utf8BOM {
+                let bom: [UInt8] = [0xEF, 0xBB, 0xBF]
+                _ = bom.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+            }
+            ok = pieceTable.streamBytes(toFileDescriptor: fd)
+        case .utf16LE, .utf16BE, .ansi:
+            let content = pieceTable.string(in: 0..<pieceTable.byteCount)
+            let data = encoding.encode(content)
+            ok = data.withUnsafeBytes { raw in
+                guard let base = raw.baseAddress else { return true }
+                return write(fd, base, raw.count) == raw.count
+            }
         }
-        let ok = pieceTable.streamBytes(toFileDescriptor: fd)
         fsync(fd)
         close(fd)
-        guard ok else {
-            unlink(tmp.path)
-            throw SaveError.writeFailed
-        }
-        guard rename(tmp.path, url.path) == 0 else {
-            unlink(tmp.path)
-            throw SaveError.renameFailed
-        }
+        guard ok else { unlink(tmp.path); throw SaveError.writeFailed }
+        guard rename(tmp.path, url.path) == 0 else { unlink(tmp.path); throw SaveError.renameFailed }
 
         fileURL = url
+        self.encoding = encoding
         markSaved()
     }
 }

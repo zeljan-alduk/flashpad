@@ -88,23 +88,41 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
     // MARK: - Saving
 
     @objc func saveDocument(_ sender: Any?) {
-        if let url = doc.fileURL { performSave(to: url) }
+        if let url = doc.fileURL { performSave(to: url, as: doc.encoding) }
         else { saveDocumentAs(sender) }
     }
 
     @objc func saveDocumentAs(_ sender: Any?) {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = doc.fileURL?.lastPathComponent ?? "Untitled.txt"
+        let picker = encodingPicker(selected: doc.encoding)
+        panel.accessoryView = picker.view
         panel.beginSheetModal(for: window!) { [weak self] resp in
-            if resp == .OK, let url = panel.url { self?.performSave(to: url) }
+            if resp == .OK, let url = panel.url {
+                self?.performSave(to: url, as: picker.encoding())
+            }
         }
     }
 
+    /// Builds a "Encoding:" popup accessory for the save panel.
+    private func encodingPicker(selected: FileEncoding) -> (view: NSView, encoding: () -> FileEncoding) {
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 40))
+        let label = NSTextField(labelWithString: "Encoding:")
+        label.frame = NSRect(x: 12, y: 10, width: 70, height: 20)
+        label.alignment = .right
+        let popup = NSPopUpButton(frame: NSRect(x: 88, y: 6, width: 200, height: 26))
+        let order: [FileEncoding] = [.utf8, .utf8BOM, .utf16LE, .utf16BE, .ansi]
+        popup.addItems(withTitles: order.map { $0.menuTitle })
+        popup.selectItem(at: order.firstIndex(of: selected) ?? 0)
+        container.addSubview(label); container.addSubview(popup)
+        return (container, { order[popup.indexOfSelectedItem] })
+    }
+
     @discardableResult
-    private func performSave(to url: URL) -> Bool {
+    private func performSave(to url: URL, as encoding: FileEncoding) -> Bool {
         do {
-            try doc.save(to: url)
-            updateTitle()
+            try doc.save(to: url, as: encoding)
+            reflectDocument()
             return true
         } catch {
             let alert = NSAlert()
@@ -118,15 +136,19 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
     /// Synchronous save used by the close prompt; returns false to cancel close.
     private func saveSynchronously() -> Bool {
         let url: URL
+        var encoding = doc.encoding
         if let u = doc.fileURL {
             url = u
         } else {
             let panel = NSSavePanel()
             panel.nameFieldStringValue = "Untitled.txt"
+            let picker = encodingPicker(selected: doc.encoding)
+            panel.accessoryView = picker.view
             guard panel.runModal() == .OK, let u = panel.url else { return false }
             url = u
+            encoding = picker.encoding()
         }
-        return performSave(to: url)
+        return performSave(to: url, as: encoding)
     }
 
     private var displayName: String { doc.fileURL?.lastPathComponent ?? "Untitled" }
@@ -138,8 +160,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
 
     /// Reflect the current document's format in the status bar + title.
     private func reflectDocument() {
-        statusBar.setEncoding(doc.format.encodingLabel)
-        statusBar.setLineEnding(doc.format.lineEndingLabel)
+        statusBar.setEncoding(doc.encodingLabel)
+        statusBar.setLineEnding(doc.lineEndingLabel)
         statusBar.setPosition(line: 1, col: 1)
         updateTitle()
     }
@@ -160,20 +182,23 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
     // MARK: - File opening
 
     func open(url: URL) {
-        guard let mapped = MappedFile(url: url) else {
-            NSSound.beep()
-            return
-        }
-        // Index on a background thread so the line model is correct before the
-        // view ever draws (a partial index would treat the file as one line).
-        // ~0.2 s for 1.5 GB, ~1.4 s for 10 GB — the UI stays responsive.
+        // Detect encoding (transcoding non-UTF-8 to a temp UTF-8 file) and index
+        // on a background thread, so the line model is correct before the view
+        // ever draws and the UI stays responsive on huge files.
         window?.title = "Opening… - Notepad"
-        let idx = LineIndex(file: mapped)
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let opened = prepareForReading(url) else {
+                DispatchQueue.main.async { NSSound.beep(); self?.updateTitle() }
+                return
+            }
+            let idx = LineIndex(file: opened.mapped)
             idx.buildSynchronously()
-            DispatchQueue.main.async { [weak self] in
+            let lineEnding = detectLineEnding(opened.mapped, from: opened.contentStart)
+            DispatchQueue.main.async {
                 guard let self else { return }
-                let doc = TextDocument(file: mapped, index: idx, url: url)
+                let doc = TextDocument(file: opened.mapped, index: idx, url: url,
+                                       encoding: opened.encoding, lineEnding: lineEnding,
+                                       contentStart: opened.contentStart, tempURL: opened.tempURL)
                 self.doc = doc
                 self.textView.setDocument(doc)
                 self.reflectDocument()
