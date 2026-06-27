@@ -1,0 +1,1 @@
+text editor,plain text,large files,log viewer,big files,fast,utf-16,unicode,developer,code

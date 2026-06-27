@@ -1,0 +1,26 @@
+FlashPad is a fast, lightweight, native macOS text editor for plain text — built to open and scroll really big files that bring other editors to a crawl.
+
+WHY IT'S FAST
+• Opens multi-gigabyte files in milliseconds by memory-mapping them instead of loading them into RAM.
+• Scrolls instantly: only the lines on screen are ever laid out.
+• Tiny memory footprint — a 1.5 GB file uses about 100 MB.
+• Launches in around a tenth of a second.
+
+EDITING
+• Full editing backed by a piece table, so even edits in huge files stay fast and light.
+• Unlimited undo/redo with sensible typing-run grouping.
+• Find, Replace, Replace All, and Go To Line.
+• Word wrap, adjustable font, and zoom.
+
+BUILT FOR REAL FILES
+• Reads and writes UTF-8, UTF-8 with BOM, UTF-16 LE/BE, and legacy ANSI (Windows-1252).
+• Detects and preserves Windows (CRLF), Unix (LF), and classic Mac (CR) line endings.
+• Choose the encoding when you save.
+
+FAMILIAR & CLEAN
+• Clean, classic editor layout with an in-window menu bar and a status bar showing line/column, zoom, line ending, and encoding.
+• Multiple windows, Recent Files, drag-and-drop to open, and printing.
+• Light and dark mode.
+• Windows-style Ctrl shortcuts work alongside the native Command shortcuts.
+
+No accounts. No tracking. No data collection. Just a fast place to read and edit text.

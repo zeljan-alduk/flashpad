@@ -1,0 +1,1 @@
+A blazing-fast, no-nonsense text editor that opens gigabyte files instantly.

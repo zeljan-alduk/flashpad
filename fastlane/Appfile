@@ -1,0 +1,4 @@
+app_identifier("tech.aldo.flashpad")
+apple_id(ENV["FASTLANE_APPLE_ID"] || "zeljan.alduk@gmail.com")
+team_id(ENV["DEVELOPMENT_TEAM"])           # 10-char Apple Developer Team ID
+itc_team_id(ENV["ITC_TEAM_ID"]) if ENV["ITC_TEAM_ID"]

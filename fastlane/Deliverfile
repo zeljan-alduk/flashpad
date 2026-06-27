@@ -1,0 +1,4 @@
+app_identifier "tech.aldo.flashpad"
+submit_for_review false
+automatic_release false
+force true
