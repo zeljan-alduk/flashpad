@@ -1,0 +1,84 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root { --mono: "Cascadia Mono","Consolas","SF Mono",Menlo,monospace;
+          --ui: -apple-system,"Segoe UI","Selawik",sans-serif; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:1280px; height:800px; }
+  body { background:#d8dde3; font-family:var(--ui);
+         display:flex; align-items:center; justify-content:center; }
+  .window { width:1280px; height:800px; background:#ffffff; display:flex; flex-direction:column;
+            overflow:hidden; }
+  /* title bar */
+  .titlebar { height:38px; background:#e9eaec; border-bottom:1px solid #d2d4d7;
+              display:flex; align-items:center; position:relative; flex:0 0 auto; }
+  .lights { display:flex; gap:8px; padding-left:13px; }
+  .light { width:12px; height:12px; border-radius:50%; }
+  .red{background:#ff5f57;} .yellow{background:#febc2e;} .green{background:#28c840;}
+  .title { position:absolute; left:0; right:0; text-align:center; font-size:13px;
+           font-weight:600; color:#3c3c3c; }
+  /* menu bar */
+  .menubar { height:30px; background:#f5f6f7; border-bottom:1px solid #e2e4e6;
+             display:flex; align-items:center; gap:22px; padding:0 16px; flex:0 0 auto; }
+  .menubar span { font-size:13px; color:#2b2b2b; }
+  /* headline row */
+  .headrow { display:flex; align-items:center; justify-content:space-between;
+             padding:14px 18px 10px 18px; flex:0 0 auto; }
+  .headline { font-family:var(--mono); font-size:21px; font-weight:700; color:#111; }
+  .badge { background:#1e1e1e; color:#eaeaea; font-family:var(--mono); font-size:13px;
+           padding:4px 11px; border-radius:13px; letter-spacing:.3px; }
+  /* editor */
+  .editor { flex:1 1 auto; padding:2px 18px 0 18px; font-family:var(--mono);
+            font-size:15px; line-height:1.45; color:#1b1b1b; overflow:hidden; white-space:pre; }
+  .editor .sec { font-weight:700; color:#111; }
+  .editor .warn { color:#9a6b00; }
+  .editor .err  { color:#b3261e; }
+  .editor .info { color:#1b1b1b; }
+  .editor .ts { color:#444; }
+  .gap { height:14px; }
+  /* status bar */
+  .status { height:28px; background:#f0f1f3; border-top:1px solid #e2e4e6; flex:0 0 auto;
+            display:flex; align-items:center; justify-content:space-between;
+            padding:0 16px; font-size:12px; color:#555; }
+  .status .right { display:flex; gap:34px; }
+</style>
+</head>
+<body>
+  <div class="window">
+    <div class="titlebar">
+      <div class="lights"><div class="light red"></div><div class="light yellow"></div><div class="light green"></div></div>
+      <div class="title">flashpad-sample.log — FlashPad</div>
+    </div>
+    <div class="menubar"><span>File</span><span>Edit</span><span>Format</span><span>View</span><span>Help</span></div>
+    <div class="headrow">
+      <div class="headline">FlashPad — opens gigabyte files instantly</div>
+      <div class="badge">0%&nbsp;&nbsp;191 MB</div>
+    </div>
+    <div class="editor" id="ed"></div>
+    <div class="status"><div>Ln 1, Col 1</div><div class="right"><div>100%</div><div>Unix (LF)</div><div>UTF-8</div></div></div>
+  </div>
+<script>
+  const lines = [];
+  lines.push(['sec','# server.log']);
+  lines.push(['info','2026-06-27T09:14:02Z  INFO   boot: mmap 1,503,238,144 bytes in 5 ms']);
+  lines.push(['info','2026-06-27T09:14:02Z  INFO   index: 17,655,000 lines @ 7.2 GB/s']);
+  lines.push(['warn','2026-06-27T09:14:05Z  WARN   cache: evicting cold pages']);
+  lines.push(['info','2026-06-27T09:14:09Z  INFO   request id=8a3f path=/api/v2/users status=200 12ms']);
+  lines.push(['err','2026-06-27T09:14:09Z  ERROR  db: connection reset, retrying (1/3)']);
+  lines.push(['gap','']);
+  const workers=['0 (0 items)','1 (37 items)','2 (74 items)','3 (111 items)','4 (148 items)','5 (185 items)','6 (222 items)','7 (259 items)'];
+  let t=10, batch=1000, wk=0;
+  for (let i=0;i<26;i++){
+    const w = wk%8;
+    const items = (i*37)%500;
+    const ss = String(t).padStart(2,'0');
+    lines.push(['info',`2026-06-27T09:14:${ss}Z  INFO   worker ${w}: processed batch ${batch} (${items} items)`]);
+    t++; batch++; wk++;
+  }
+  const ed = document.getElementById('ed');
+  ed.innerHTML = lines.map(([c,txt]) => c==='gap' ? '<div class="gap"></div>' : `<div class="${c}">${txt}</div>`).join('');
+</script>
+</body>
+</html>

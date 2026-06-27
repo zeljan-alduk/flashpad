@@ -31,6 +31,7 @@ targets:
         CFBundleName: FlashPad
         CFBundleDisplayName: FlashPad
         CFBundleIconFile: AppIcon
+        LSApplicationCategoryType: public.app-category.productivity
         LSMinimumSystemVersion: "13.0"
         NSHighResolutionCapable: true
         NSHumanReadableCopyright: "© 2026 Željan Alduk"
