@@ -6,8 +6,12 @@
 #   ASC_KEY_PATH     path to the AuthKey_XXXX.p8 file
 #   DEVELOPMENT_TEAM 10-char Apple Developer Team ID
 #
+# One-time signing setup (no interactive login):
+#   ruby Scripts/asc-provision.rb   # bundle id + certs + Mac App Store profile
+#   (then create the app record once in the browser — Apple forbids it via API)
+#
 # Lanes:
-#   fastlane mac bootstrap   # once: register the App ID + create the app record
+#   fastlane mac build       # build + sign + export build/FlashPad.pkg (no upload)
 #   fastlane mac release     # build, sign, upload to App Store Connect
 #   fastlane mac submit      # release + submit for review
 
@@ -23,15 +27,16 @@ def asc_api_key
 end
 
 platform :mac do
-  desc "One-time: register the App ID and create the App Store Connect record."
-  lane :bootstrap do
-    produce(
-      api_key: asc_api_key,
-      app_identifier: "tech.aldo.flashpad",
-      app_name: "FlashPad",
-      platforms: ["osx"],
-      mac: true,
-    )
+  # NOTE: the Bundle ID `tech.aldo.flashpad` is already registered (done once
+  # via the App Store Connect API). Apple does NOT allow creating the *app
+  # record* through the API, so that single step is manual:
+  #   App Store Connect -> Apps -> + -> New App -> platform macOS,
+  #   bundle ID tech.aldo.flashpad, name FlashPad, SKU flashpad, language English.
+  # After that one click, `release` / `submit` are fully automated.
+
+  desc "Build + sign + export the .pkg only (no upload). Verifies signing."
+  lane :build do
+    do_build
   end
 
   desc "Build + sign + upload to App Store Connect."
@@ -44,8 +49,15 @@ platform :mac do
     do_upload(submit: true)
   end
 
-  private_lane :do_upload do |options|
-    key = asc_api_key
+  # Manual signing with the distribution assets we provisioned once via the
+  # App Store Connect API (certs + Mac App Store profile). This is fully
+  # deterministic and needs no interactive Apple ID login or Xcode cloud
+  # signing (which the API key role can't perform).
+  APP_PROFILE   = "FlashPad Mac App Store"
+  APP_IDENTITY  = "Apple Distribution: Zeljan Alduk (LDTL6HXKHN)"
+  PKG_IDENTITY  = "3rd Party Mac Developer Installer: Zeljan Alduk (LDTL6HXKHN)"
+
+  private_lane :do_build do
     team = ENV.fetch("DEVELOPMENT_TEAM")
 
     sh("cd .. && xcodegen generate")
@@ -56,11 +68,28 @@ platform :mac do
       configuration: "Release",
       export_method: "app-store",
       export_team_id: team,
-      # Let Xcode create/refresh the distribution cert + Mac App Store profile.
-      xcargs: "-allowProvisioningUpdates DEVELOPMENT_TEAM=#{team} CODE_SIGN_STYLE=Automatic",
+      codesigning_identity: APP_IDENTITY,
+      installer_cert_name: PKG_IDENTITY,
+      xcargs: "DEVELOPMENT_TEAM=#{team} CODE_SIGN_STYLE=Manual " \
+              "CODE_SIGN_IDENTITY='#{APP_IDENTITY}' " \
+              "PROVISIONING_PROFILE_SPECIFIER='#{APP_PROFILE}'",
+      export_options: {
+        method: "app-store",
+        teamID: team,
+        signingStyle: "manual",
+        signingCertificate: APP_IDENTITY,
+        installerSigningCertificate: PKG_IDENTITY,
+        provisioningProfiles: { "tech.aldo.flashpad" => APP_PROFILE },
+      },
       output_directory: "build",
       output_name: "FlashPad",
     )
+  end
+
+  private_lane :do_upload do |options|
+    key = asc_api_key
+
+    do_build
 
     upload_to_app_store(
       api_key: key,

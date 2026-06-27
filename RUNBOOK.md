@@ -89,21 +89,36 @@ Sanity check: `echo "$ASC_KEY_ID $DEVELOPMENT_TEAM"` and `ls "$ASC_KEY_PATH"`.
 
 ---
 
-## 5. Bootstrap — register the App ID + create the app record (one time)
+## 5. Provision signing assets (one time, automated)
+
+Apple's App Store Connect API can't do Xcode "cloud signing" with our key role,
+so instead we create the distribution assets directly via the API. This is
+already done for this account, but on a fresh machine (or after a cert expires)
+re-run the idempotent script — it reuses anything that already exists:
 
 ```bash
-fastlane mac bootstrap
+ruby Scripts/asc-provision.rb
 ```
 
-This registers the `tech.aldo.flashpad` App ID and creates the FlashPad app
-record in App Store Connect. If the name "FlashPad" is already taken on the
-store you'll get an error here — pick a different `app_name` in
-`fastlane/Fastfile` (the bundle ID can stay).
+This registers the Bundle ID `tech.aldo.flashpad`, creates an **Apple
+Distribution** cert + a **Mac Installer Distribution** cert (imported into your
+login keychain), and creates + installs the **Mac App Store** provisioning
+profile. After this, `fastlane mac build` produces a fully signed
+`build/FlashPad.pkg` with no interactive login.
 
-> If `produce` can't create the Mac app for any reason, you can instead create
-> the app manually once: **App Store Connect → Apps → + → New App**, platform
-> **macOS**, bundle ID **tech.aldo.flashpad**, SKU `flashpad`, name `FlashPad`.
-> Then skip straight to step 6.
+## 5b. Create the app record (one time, MANUAL — Apple requires a human)
+
+The App Store Connect API **forbids creating app records** (`apps` does not
+allow CREATE), so this single step must be done in the browser:
+
+1. <https://appstoreconnect.apple.com> → **Apps → + → New App**.
+2. Platform **macOS**; Bundle ID **tech.aldo.flashpad** (it's already registered,
+   so it appears in the dropdown); Name **FlashPad**; Primary language
+   **English (U.S.)**; SKU **flashpad**.
+3. **Create**.
+
+If the name "FlashPad" is already taken on the store, pick another name in the
+New App dialog and in `fastlane/metadata/en-US/name.txt`.
 
 ---
 
@@ -148,8 +163,9 @@ After a successful `release`:
 |------|-----|
 | Accept Developer + Free Apps agreements | **You**, once, in browser |
 | Generate API key (.p8 + Key ID + Issuer ID) | **You**, once, in browser |
-| Register App ID + create app record | `fastlane mac bootstrap` (or browser) |
-| Build, sign, export, provisioning | `fastlane mac release` |
+| Register Bundle ID + certs + provisioning profile | `ruby Scripts/asc-provision.rb` |
+| Create the app record | **You**, once, in browser (API forbids it) |
+| Build, sign, export `.pkg` | `fastlane mac build` / `release` |
 | Upload binary + metadata + screenshots | `fastlane mac release` |
 | App Privacy answers + age rating | **You**, once, in browser |
 | Submit for review | `fastlane mac submit` (or browser button) |
