@@ -41,6 +41,9 @@ targets:
         # Every window is independent; also allow whole extra app instances
         # (`open -n -a FlashPad`), Windows-Notepad style.
         LSMultipleInstancesProhibited: false
+        # No non-exempt encryption; answers the export-compliance question so
+        # submission never blocks on it.
+        ITSAppUsesNonExemptEncryption: false
         NSHumanReadableCopyright: "© 2026 Željan Alduk"
         NSMainNibFile: ""
         NSPrincipalClass: NSApplication

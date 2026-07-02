@@ -39,6 +39,14 @@ Build + sign + upload to App Store Connect.
 
 Build + sign + upload + submit for review.
 
+### mac submit_existing
+
+```sh
+[bundle exec] fastlane mac submit_existing
+```
+
+Submit the already-uploaded build for review (no rebuild/re-upload).
+
 ----
 
 This README.md is auto-generated and will be re-generated every time [_fastlane_](https://fastlane.tools) is run.

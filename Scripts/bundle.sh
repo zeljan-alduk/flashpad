@@ -29,8 +29,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>FlashPad</string>
   <key>CFBundleDisplayName</key><string>FlashPad</string>
   <key>CFBundleIdentifier</key><string>tech.aldo.flashpad</string>
-  <key>CFBundleVersion</key><string>0.1</string>
-  <key>CFBundleShortVersionString</key><string>0.1</string>
+  <key>CFBundleVersion</key><string>2</string>
+  <key>CFBundleShortVersionString</key><string>1.1</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleExecutable</key><string>FlashPad</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
@@ -45,6 +45,13 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
       <key>CFBundleTypeRole</key><string>Editor</string>
       <key>LSItemContentTypes</key>
       <array><string>public.plain-text</string><string>public.text</string></array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key><string>Binary Data</string>
+      <key>CFBundleTypeRole</key><string>Editor</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array><string>public.data</string></array>
     </dict>
   </array>
 </dict>

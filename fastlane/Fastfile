@@ -49,6 +49,22 @@ platform :mac do
     do_upload(submit: true)
   end
 
+  desc "Submit the already-uploaded build for review (no rebuild/re-upload)."
+  lane :submit_existing do
+    upload_to_app_store(
+      api_key: asc_api_key,
+      platform: "osx",
+      skip_binary_upload: true,
+      skip_screenshots: true,
+      skip_metadata: true,
+      submit_for_review: true,
+      automatic_release: false,
+      force: true,
+      run_precheck_before_submit: false,
+      submission_information: { export_compliance_uses_encryption: false },
+    )
+  end
+
   # Manual signing with the distribution assets we provisioned once via the
   # App Store Connect API (certs + Mac App Store profile). This is fully
   # deterministic and needs no interactive Apple ID login or Xcode cloud
@@ -101,6 +117,7 @@ platform :mac do
       run_precheck_before_submit: false,
       skip_screenshots: false,
       skip_metadata: false,
+      submission_information: { export_compliance_uses_encryption: false },
     )
   end
 end
